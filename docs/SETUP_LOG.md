@@ -269,6 +269,68 @@ All SNS & SQS infrastructure is ready:
 
 ---
 
-## Next: Story 4.1 - Create OrderReceiver Lambda
-**Estimated Time:** 30 minutes
-**Prerequisites:** IAM role created, DynamoDB tables ready
+## ✅ EPIC 4: Lambda Functions
+
+### Story 4.1: Create OrderReceiver Lambda ✅
+**Date:** November 27, 2025
+**Status:** Completed
+
+#### Lambda Function Created:
+- **Function Name:** OrderReceiver
+- **Runtime:** Node.js 20.x
+- **Handler:** index.handler
+- **Timeout:** 30 seconds
+- **Memory:** 256 MB
+- **Execution Role:** OrderProcessingLambdaRole
+- **Function ARN:** [Your ARN here - copy from Lambda Console]
+
+#### Environment Variables:
+1. **ORDERS_TABLE:** Orders
+2. **INVENTORY_TABLE:** Inventory
+3. **STRIPE_SECRET_KEY:** sk_test_... (your Stripe secret key)
+4. **AWS_REGION:** us-east-1
+
+#### Code Details:
+- **Local Path:** `lambda-functions/OrderReceiver/`
+- **Deployment Package:** OrderReceiver.zip (4.9MB)
+- **Dependencies:** @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, stripe
+
+#### Function Logic:
+1. Parse request body (userId, items array)
+2. Validate inventory using BatchGetCommand
+3. Check stock availability
+4. Calculate total amount
+5. Create Stripe Payment Intent (amount in cents)
+6. Save order to DynamoDB (status: PAYMENT_PENDING)
+7. Return orderId and clientSecret
+
+#### Test Results:
+- **Test Event:** TestOrder (2 products: PROD001 + PROD002)
+- **Execution Status:** Success ✅
+- **Response Status Code:** 200
+- **Order ID Generated:** ORD-[timestamp]-user-
+- **Payment Intent Created:** pi_... (Stripe)
+- **Total Amount:** $119.98
+- **Execution Duration:** ~500-2000ms
+
+#### Verification Steps Completed:
+- ✅ Lambda function deployed successfully
+- ✅ Environment variables configured
+- ✅ Test execution passed
+- ✅ Order saved to DynamoDB Orders table
+- ✅ Payment Intent created in Stripe dashboard
+- ✅ CloudWatch logs show successful execution
+- ✅ Function ARN copied for API Gateway
+
+#### Screenshots Taken:
+- `lambda-orderreceiver-overview.png` - Function configuration
+- `lambda-orderreceiver-env-vars.png` - Environment variables
+- `lambda-orderreceiver-test-success.png` - Test execution results
+- `dynamodb-test-order.png` - Order in DynamoDB
+- `stripe-payment-intent.png` - Payment Intent in Stripe
+
+---
+
+## Next: Story 4.2 - Create PaymentHandler Lambda
+**Estimated Time:** 40 minutes
+**Prerequisites:** Stripe webhook endpoint URL (will create in Lambda)

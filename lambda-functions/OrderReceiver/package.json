@@ -1,0 +1,17 @@
+{
+  "name": "order-receiver",
+  "version": "1.0.0",
+  "description": "Lambda function to receive and process order requests",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.478.0",
+    "@aws-sdk/lib-dynamodb": "^3.478.0",
+    "stripe": "^14.5.0"
+  },
+  "keywords": ["lambda", "order-processing", "stripe", "dynamodb"],
+  "author": "Rutvik Rana",
+  "license": "ISC"
+}
