@@ -331,6 +331,61 @@ All SNS & SQS infrastructure is ready:
 
 ---
 
-## Next: Story 4.2 - Create PaymentHandler Lambda
-**Estimated Time:** 40 minutes
-**Prerequisites:** Stripe webhook endpoint URL (will create in Lambda)
+## Story 4.2: Create PaymentHandler Lambda ⏸️ (Partial - Will complete in Story 5.1)
+**Date:** November 27, 2025
+**Status:** Partially Complete (awaiting API Gateway URL for Stripe webhook)
+
+#### Lambda Function Created:
+- **Function Name:** PaymentHandler
+- **Runtime:** Node.js 20.x
+- **Handler:** index.handler
+- **Timeout:** 30 seconds
+- **Memory:** 256 MB
+- **Execution Role:** OrderProcessingLambdaRole
+- **Function ARN:** [Your ARN here - copy from Lambda Console]
+
+#### Environment Variables:
+1. **ORDERS_TABLE:** Orders
+2. **ORDER_EVENTS_TOPIC_ARN:** [Your OrderEvents-Topic ARN from Story 2.1]
+3. **STRIPE_SECRET_KEY:** sk_test_... (same as OrderReceiver)
+4. **STRIPE_WEBHOOK_SECRET:** PLACEHOLDER (⏳ will update after Story 5.1)
+5. **AWS_REGION:** ap-south-1
+
+#### Code Details:
+- **Local Path:** `lambda-functions/PaymentHandler/`
+- **Deployment Package:** PaymentHandler.zip (5.2MB)
+- **Dependencies:** @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb, @aws-sdk/client-sns, stripe
+
+#### Function Logic:
+1. Verify Stripe webhook signature (CRITICAL security)
+2. Handle payment_intent.succeeded event
+3. Find order by paymentIntentId (uses scan - GSI recommended for production)
+4. Update order status to COMPLETED
+5. Add paidAt timestamp
+6. Publish ORDER_COMPLETED event to SNS
+7. Return 200 to acknowledge webhook
+
+#### Test Results (Partial):
+- **Test Event:** TestWebhook (fake signature)
+- **Expected Result:** 400 - Invalid signature ✅
+- **Signature Verification:** Working correctly ✅
+- **Full Payment Test:** ⏳ Pending (needs real webhook from Stripe)
+
+#### Pending Steps (Story 5.1):
+1. Create API Gateway REST API
+2. Get webhook URL (POST /webhooks/stripe)
+3. Create Stripe webhook endpoint
+4. Copy webhook signing secret (whsec_...)
+5. Update STRIPE_WEBHOOK_SECRET environment variable
+6. Test complete payment flow
+
+#### Screenshots Taken:
+- `lambda-paymenthandler-overview.png` - Function configuration
+- `lambda-paymenthandler-env-vars.png` - Environment variables (with PLACEHOLDER)
+- `lambda-paymenthandler-test-partial.png` - Signature verification working
+
+---
+
+## Next: Story 5.1 - Create API Gateway REST API
+**Estimated Time:** 45 minutes
+**Prerequisites:** Both Lambda functions (OrderReceiver, PaymentHandler) created

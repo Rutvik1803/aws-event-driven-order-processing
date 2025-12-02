@@ -844,3 +844,374 @@ This document contains all interview questions and detailed answers from each st
 
 ---
 
+## EPIC 4: Story 4.2 - PaymentHandler Lambda
+
+### Q1: Why do we need to verify the Stripe webhook signature? What security risk does it prevent?
+
+**Answer:**
+Without signature verification, anyone could send fake webhook requests to our endpoint:
+- **Attack scenario:** Attacker sends POST request with `{"type":"payment_intent.succeeded","data":{"object":{"id":"pi_fake"}}}` 
+- **Without verification:** Lambda would mark orders as paid without actual payment ❌
+- **With verification:** Lambda verifies HMAC-SHA256 signature using STRIPE_WEBHOOK_SECRET, rejects fake requests ✅
+
+**How it works:**
+1. Stripe computes HMAC: `HMAC-SHA256(payload, webhook_secret)`
+2. Sends in header: `Stripe-Signature: t=timestamp,v1=computed_signature`
+3. Lambda recomputes signature and compares
+4. Only processes if signatures match
+
+**Why return 200 even on application errors?**
+- Stripe retries failed webhooks (non-200 status)
+- Application errors (order not found, DB error) shouldn't trigger retries
+- Only invalid signatures should return 400
+
+---
+
+### Q2: What's the difference between STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET?
+
+**Answer:**
+
+| Secret Type | Format | Used For | Where to Get |
+|------------|--------|----------|-------------|
+| **API Secret Key** | `sk_test_...` or `sk_live_...` | Making API calls TO Stripe (create Payment Intents, refunds) | Stripe Dashboard → Developers → API keys |
+| **Webhook Secret** | `whsec_...` | Verifying webhooks FROM Stripe (signature validation) | Stripe Dashboard → Developers → Webhooks → Signing secret |
+
+**Both are required in this project:**
+- **OrderReceiver:** Uses API secret to create Payment Intents
+- **PaymentHandler:** Uses webhook secret to verify webhook signatures
+
+**Security best practice:**
+- Store in environment variables (never commit to Git)
+- Use different secrets for dev/production
+- Rotate secrets if compromised
+
+---
+
+### Q3: Why do we use Scan to find orders by paymentIntentId? What's the performance impact?
+
+**Answer:**
+
+**Current implementation:**
+```javascript
+const scanCommand = new ScanCommand({
+  TableName: ORDERS_TABLE,
+  FilterExpression: "paymentIntentId = :piId",
+  ExpressionAttributeValues: { ":piId": paymentIntentId }
+});
+```
+
+**Why Scan is non-optimal:**
+- Reads EVERY item in the table
+- Applies filter AFTER reading
+- Cost: Charged for all scanned items (not just matched ones)
+- Performance: O(n) - scales linearly with table size
+
+**Production improvement - Add GSI:**
+```javascript
+// Create Global Secondary Index on paymentIntentId
+GSI: paymentIntentId (Partition Key)
+
+// Then use Query instead of Scan
+const queryCommand = new QueryCommand({
+  TableName: ORDERS_TABLE,
+  IndexName: "paymentIntentId-index",
+  KeyConditionExpression: "paymentIntentId = :piId",
+  ExpressionAttributeValues: { ":piId": paymentIntentId }
+});
+```
+
+**Performance comparison (10,000 orders):**
+- **Scan:** Reads 10,000 items, costs ~$0.25
+- **Query with GSI:** Reads 1 item, costs ~$0.000025
+
+**Why we didn't add GSI yet?**
+- Learning project - want to show both approaches
+- Will add in "production improvements" section
+- Good interview talking point
+
+---
+
+### Q4: Why do we publish to SNS instead of calling SQS directly?
+
+**Answer:**
+
+**Direct SQS approach (tightly coupled):**
+```javascript
+await sqsClient.send(new SendMessageCommand({ QueueUrl: EMAIL_QUEUE }));
+await sqsClient.send(new SendMessageCommand({ QueueUrl: INVENTORY_QUEUE }));
+```
+❌ Lambda needs to know about all queues
+❌ Adding new processor requires Lambda code change
+❌ 2 API calls = more latency
+
+**SNS fan-out approach (loosely coupled):**
+```javascript
+await snsClient.send(new PublishCommand({ TopicArn: ORDER_EVENTS_TOPIC_ARN }));
+```
+✅ Lambda publishes once, SNS handles distribution
+✅ Add new queue → just subscribe to topic (no code change)
+✅ 1 API call = lower latency
+✅ Better scalability - SNS handles delivery retries
+
+**Fan-out pattern benefits:**
+- **Decoupling:** Publishers don't know about subscribers
+- **Flexibility:** Add/remove subscribers without code changes
+- **Reliability:** SNS retries failed deliveries
+- **Observability:** SNS metrics show publish/delivery counts
+
+---
+
+### Q5: What are MessageAttributes in SNS and why do we include them?
+
+**Answer:**
+
+**Code:**
+```javascript
+const publishCommand = new PublishCommand({
+  TopicArn: ORDER_EVENTS_TOPIC_ARN,
+  Message: JSON.stringify({
+    eventType: 'ORDER_COMPLETED',
+    orderId: order.orderId,
+    // ... rest of data
+  }),
+  MessageAttributes: {
+    eventType: {
+      DataType: 'String',
+      StringValue: 'ORDER_COMPLETED'
+    },
+    orderId: {
+      DataType: 'String',
+      StringValue: order.orderId
+    }
+  }
+});
+```
+
+**Purpose:**
+1. **SQS Filtering (future feature):**
+```javascript
+// EmailQueue could filter: only ORDER_COMPLETED events
+SubscriptionFilterPolicy: {
+  "eventType": ["ORDER_COMPLETED", "ORDER_SHIPPED"]
+}
+
+// InventoryQueue could filter: only ORDER_COMPLETED and ORDER_CANCELLED
+SubscriptionFilterPolicy: {
+  "eventType": ["ORDER_COMPLETED", "ORDER_CANCELLED"]
+}
+```
+Without filter: ALL messages delivered to ALL queues (process and discard unwanted)
+With filter: SQS only receives relevant messages (more efficient)
+
+2. **Observability:**
+CloudWatch metrics can track by attribute (how many ORDER_COMPLETED vs ORDER_FAILED)
+
+3. **Routing logic:**
+SNS can route to different endpoints based on attributes
+
+**Data types supported:**
+- String, Number, Binary
+- String.Array (multiple values)
+
+---
+
+### Q6: How do we handle duplicate webhook deliveries from Stripe?
+
+**Answer:**
+
+**Why duplicates occur:**
+- Network timeout (Stripe didn't receive 200 response)
+- Lambda cold start delay (>30s response time)
+- Stripe internal retry logic
+
+**Current code handling:**
+```javascript
+// Find order
+const order = await findOrderByPaymentIntent(paymentIntentId);
+if (!order) {
+  return { statusCode: 200, body: JSON.stringify({ error: "Order not found" }) };
+}
+
+// Update only if PAYMENT_PENDING (idempotency)
+if (order.status !== 'PAYMENT_PENDING') {
+  console.log(`Order ${order.orderId} already processed (status: ${order.status})`);
+  return { statusCode: 200, body: JSON.stringify({ received: true, note: "Already processed" }) };
+}
+```
+
+✅ If webhook arrives twice:
+1. First delivery: Updates status to COMPLETED, publishes to SNS
+2. Second delivery: Finds order with status=COMPLETED, skips update, returns 200
+
+**Production improvements:**
+1. **Track webhook events:**
+```javascript
+// DynamoDB table: WebhookEvents
+{
+  eventId: "evt_123...", // Stripe event ID
+  processedAt: "2025-11-27T12:00:00Z",
+  orderId: "ORD-..."
+}
+
+// Check before processing
+const existingEvent = await getWebhookEvent(stripeEvent.id);
+if (existingEvent) {
+  return { statusCode: 200, body: "Already processed" };
+}
+```
+
+2. **Use DynamoDB conditional updates:**
+```javascript
+const updateCommand = new UpdateCommand({
+  Key: { orderId: order.orderId },
+  UpdateExpression: "SET #status = :completed",
+  ConditionExpression: "#status = :pending", // Only update if still PENDING
+  ExpressionAttributeNames: { "#status": "status" },
+  ExpressionAttributeValues: {
+    ":completed": "COMPLETED",
+    ":pending": "PAYMENT_PENDING"
+  }
+});
+// Throws error if condition fails (order already completed)
+```
+
+**Stripe retry behavior:**
+- Retries for 3 days with exponential backoff
+- Manual retry available in Dashboard
+- Events logged in Dashboard → Developers → Webhooks → Event logs
+
+---
+
+### Q7: What happens if the SNS publish fails after we update the order status?
+
+**Answer:**
+
+**Failure scenario:**
+```javascript
+// Step 1: Update order status to COMPLETED ✅
+await docClient.send(updateCommand);
+
+// Step 2: Publish to SNS ❌ (network error, SNS throttling, permission issue)
+await snsClient.send(publishCommand);
+```
+
+**Result:**
+- Order marked as COMPLETED in DynamoDB
+- No SNS event published
+- Email not sent ❌
+- Inventory not updated ❌
+
+**Current code:** Returns 200 (Stripe won't retry)
+```javascript
+} catch (error) {
+  console.error('Error handling payment success:', error);
+  return { statusCode: 200, body: JSON.stringify({ received: true, error: error.message }) };
+}
+```
+
+**Why return 200 on error?**
+- Order is already COMPLETED in DynamoDB
+- Stripe retry would be duplicate
+- Need different recovery mechanism
+
+**Production solutions:**
+
+**Option 1: DynamoDB Streams (recommended)**
+```javascript
+// Enable DynamoDB Stream on Orders table
+// Create Lambda trigger on Stream
+// Lambda reads MODIFY events → publishes to SNS
+// If SNS fails, Lambda retries (built-in retry logic)
+```
+Benefits: Decouples order update from SNS publish, automatic retries
+
+**Option 2: Step Functions (complex workflows)**
+```javascript
+// Step Function workflow:
+// Step 1: Update DynamoDB
+// Step 2: Publish to SNS (with automatic retries)
+// Step 3: If all fail → send to DLQ
+```
+
+**Option 3: Manual reconciliation job**
+```javascript
+// Cron job runs every hour
+// Finds orders with status=COMPLETED AND publishedAt IS NULL
+// Republishes to SNS
+```
+
+**Best practice:** Use DynamoDB Streams for guaranteed event delivery
+
+---
+
+### Q8: How would you monitor PaymentHandler in production?
+
+**Answer:**
+
+**CloudWatch Metrics to track:**
+1. **Invocations:** Total webhook calls received
+2. **Errors:** Failed executions (should be near 0)
+3. **Duration:** Average processing time (expect <1s)
+4. **Throttles:** Lambda concurrency limit hit
+5. **Invalid signatures:** Count of 400 responses (potential attack)
+
+**CloudWatch Alarms to create:**
+```javascript
+// Alarm 1: High error rate
+if (ErrorRate > 5%) {
+  notify('SNS:AdminAlerts', 'PaymentHandler failing');
+}
+
+// Alarm 2: No invocations (webhook URL broken?)
+if (InvocationsLast1Hour == 0) {
+  notify('SNS:AdminAlerts', 'No webhooks received');
+}
+
+// Alarm 3: Duration spike (performance issue)
+if (AverageDuration > 5s) {
+  notify('SNS:AdminAlerts', 'PaymentHandler slow');
+}
+
+// Alarm 4: Invalid signature spike (attack?)
+if (InvalidSignaturesLast5Min > 10) {
+  notify('SNS:AdminAlerts', 'Potential webhook attack');
+}
+```
+
+**Custom CloudWatch Logs Insights queries:**
+```sql
+-- Find all failed payments
+fields @timestamp, orderId, paymentIntentId, error
+| filter @message like /Error handling payment/
+| sort @timestamp desc
+
+-- Track processing time by payment amount
+fields @timestamp, orderId, totalAmount, @duration
+| filter eventType = "ORDER_COMPLETED"
+| stats avg(@duration) by bin(1h)
+
+-- Find duplicate webhook deliveries
+fields @timestamp, paymentIntentId
+| filter @message like /Already processed/
+| stats count() by paymentIntentId
+```
+
+**Stripe webhook monitoring:**
+- Stripe Dashboard → Developers → Webhooks → Event logs
+- Check for failed deliveries (Stripe shows HTTP status)
+- Review retry attempts
+
+**X-Ray tracing (advanced):**
+```javascript
+// Enable X-Ray in Lambda console
+// Shows trace: Stripe webhook → Lambda → DynamoDB → SNS
+// Identifies bottlenecks (is DynamoDB slow? SNS timing out?)
+```
+
+**Business metrics:**
+- Payment success rate: (COMPLETED orders / total Payment Intents)
+- Time from payment to email: (email sent timestamp - paidAt)
+- Webhook processing lag: (webhook received - payment completed in Stripe)
+
+---
+
